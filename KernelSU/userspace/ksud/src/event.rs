@@ -1,36 +1,31 @@
 use std::{collections::HashMap, path::Path};
 
 use crate::{
-    defs,
-    utils::{ensure_clean_dir, mount_image},
+    assets, defs, mount,
+    utils::{ensure_clean_dir, ensure_dir_exists},
 };
-use anyhow::{bail, Result};
-use subprocess::Exec;
+use anyhow::{bail, Context, Result};
+use log::{info, warn};
 
-fn mount_partition(partition: &str, lowerdir: &mut Vec<String>) {
+fn mount_partition(partition: &str, lowerdir: &mut Vec<String>) -> Result<()> {
     if lowerdir.is_empty() {
-        println!("partition: {} lowerdir is empty", partition);
-        return;
+        warn!("partition: {partition} lowerdir is empty");
+        return Ok(());
     }
 
+    // if /partition is a symlink and linked to /system/partition, then we don't need to overlay it separately
+    if Path::new(&format!("/{partition}")).read_link().is_ok() {
+        warn!("partition: {partition} is a symlink");
+        return Ok(());
+    }
     // add /partition as the lowerest dir
-    let lowest_dir = format!("/{}", partition);
+    let lowest_dir = format!("/{partition}");
     lowerdir.push(lowest_dir.clone());
 
     let lowerdir = lowerdir.join(":");
-    println!("partition: {} lowerdir: {}", partition, lowerdir);
+    info!("partition: {partition} lowerdir: {lowerdir}");
 
-    let mount_args = format!(
-        "mount -t overlay overlay -o ro,lowerdir={} {}",
-        lowerdir, lowest_dir
-    );
-    if let Ok(result) = Exec::shell(mount_args).join() {
-        if !result.success() {
-            println!("mount partition: {} overlay failed", partition);
-        }
-    } else {
-        println!("mount partition: {} overlay failed", partition);
-    }
+    mount::mount_overlay(&lowerdir, &lowest_dir)
 }
 
 pub fn do_systemless_mount(module_dir: &str) -> Result<()> {
@@ -55,19 +50,21 @@ pub fn do_systemless_mount(module_dir: &str) -> Result<()> {
         }
         let disabled = module.join(defs::DISABLE_FILE_NAME).exists();
         if disabled {
-            println!("module: {} is disabled, ignore!", module.display());
+            info!("module: {} is disabled, ignore!", module.display());
             continue;
         }
 
         let module_system = Path::new(&module).join("system");
         if !module_system.as_path().exists() {
-            println!("module: {} has no system overlay.", module.display());
+            info!("module: {} has no system overlay.", module.display());
             continue;
         }
         system_lowerdir.push(format!("{}", module_system.display()));
 
         for part in &partition {
-            let part_path = Path::new(&module_system).join(part);
+            // if /partition is a mountpoint, we would move it to $MODPATH/$partition when install
+            // otherwise it must be a symlink and we don't need to overlay!
+            let part_path = Path::new(&module).join(part);
             if !part_path.exists() {
                 continue;
             }
@@ -78,11 +75,15 @@ pub fn do_systemless_mount(module_dir: &str) -> Result<()> {
     }
 
     // mount /system first
-    mount_partition("system", &mut system_lowerdir);
+    if let Err(e) = mount_partition("system", &mut system_lowerdir) {
+        warn!("mount system failed: {e}");
+    }
 
     // mount other partitions
     for (k, mut v) in partition_lowerdir {
-        mount_partition(&k, &mut v);
+        if let Err(e) = mount_partition(&k, &mut v) {
+            warn!("mount {k} failed: {e}");
+        }
     }
 
     Ok(())
@@ -100,6 +101,8 @@ pub fn on_post_data_fs() -> Result<()> {
 
     // we should clean the module mount point if it exists
     ensure_clean_dir(module_dir)?;
+
+    assets::ensure_bin_assets().with_context(|| "Failed to extract bin assets")?;
 
     if Path::new(module_update_img).exists() {
         if module_update_flag.exists() {
@@ -120,21 +123,30 @@ pub fn on_post_data_fs() -> Result<()> {
         return Ok(());
     }
 
-    println!("mount {} to {}", target_update_img, module_dir);
-    mount_image(target_update_img, module_dir)?;
+    info!("mount {target_update_img} to {module_dir}");
+    mount::mount_ext4(target_update_img, module_dir)?;
+
+    // load sepolicy.rule
+    if crate::module::load_sepolicy_rule().is_err() {
+        warn!("load sepolicy.rule failed");
+    }
 
     // mount systemless overlay
     if let Err(e) = do_systemless_mount(module_dir) {
-        println!("do systemless mount failed: {}", e);
+        warn!("do systemless mount failed: {}", e);
     }
 
     // module mounted, exec modules post-fs-data scripts
-    if !crate::utils::is_safe_mode().unwrap_or(false) {
+    if !crate::utils::is_safe_mode() {
         // todo: Add timeout
-        let _ = crate::module::exec_post_fs_data();
-        let _ = crate::module::load_system_prop();
+        if let Err(e) = crate::module::exec_post_fs_data() {
+            warn!("exec post-fs-data scripts failed: {}", e);
+        }
+        if let Err(e) = crate::module::load_system_prop() {
+            warn!("load system.prop failed: {}", e);
+        }
     } else {
-        println!("safe mode, skip module post-fs-data scripts");
+        warn!("safe mode, skip module post-fs-data scripts");
     }
 
     Ok(())
@@ -142,10 +154,12 @@ pub fn on_post_data_fs() -> Result<()> {
 
 pub fn on_services() -> Result<()> {
     // exec modules service.sh scripts
-    if !crate::utils::is_safe_mode().unwrap_or(false) {
-        let _ = crate::module::exec_services();
+    if !crate::utils::is_safe_mode() {
+        if let Err(e) = crate::module::exec_services() {
+            warn!("exec service scripts failed: {}", e);
+        }
     } else {
-        println!("safe mode, skip module service scripts");
+        warn!("safe mode, skip module service scripts");
     }
 
     Ok(())
@@ -167,9 +181,9 @@ pub fn daemon() -> Result<()> {
 }
 
 pub fn install() -> Result<()> {
-    let src = "/proc/self/exe";
-    let dst = defs::DAEMON_PATH;
+    ensure_dir_exists(defs::ADB_DIR)?;
+    std::fs::copy("/proc/self/exe", defs::DAEMON_PATH)?;
 
-    std::fs::copy(src, dst)?;
-    Ok(())
+    // install binary assets also!
+    assets::ensure_bin_assets().with_context(|| "Failed to extract assets")
 }
