@@ -124,7 +124,8 @@ pub fn on_post_data_fs() -> Result<()> {
     }
 
     info!("mount {target_update_img} to {module_dir}");
-    mount::mount_ext4(target_update_img, module_dir)?;
+    mount::AutoMountExt4::try_new(target_update_img, module_dir, false)
+        .with_context(|| "mount module image failed".to_string())?;
 
     // load sepolicy.rule
     if crate::module::load_sepolicy_rule().is_err() {
@@ -139,6 +140,9 @@ pub fn on_post_data_fs() -> Result<()> {
     // module mounted, exec modules post-fs-data scripts
     if !crate::utils::is_safe_mode() {
         // todo: Add timeout
+        if let Err(e) = crate::module::exec_common_scripts("post-fs-data.d", true) {
+            warn!("exec common post-fs-data scripts failed: {}", e);
+        }
         if let Err(e) = crate::module::exec_post_fs_data() {
             warn!("exec post-fs-data scripts failed: {}", e);
         }
@@ -155,6 +159,9 @@ pub fn on_post_data_fs() -> Result<()> {
 pub fn on_services() -> Result<()> {
     // exec modules service.sh scripts
     if !crate::utils::is_safe_mode() {
+        if let Err(e) = crate::module::exec_common_scripts("service.d", false) {
+            warn!("exec common service scripts failed: {}", e);
+        }
         if let Err(e) = crate::module::exec_services() {
             warn!("exec service scripts failed: {}", e);
         }
