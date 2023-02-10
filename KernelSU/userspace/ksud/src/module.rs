@@ -25,9 +25,15 @@ use zip_extensions::zip_extract_file_to_memory;
 #[cfg(unix)]
 use std::os::unix::{prelude::PermissionsExt, process::CommandExt};
 
-const UTIL_FUNCTIONS: &str = include_str!("./installer.sh");
-const INSTALL_MODULE_SCRIPT: &str =
-    concatcp!(UTIL_FUNCTIONS, "\n", "install_module", "\n", "exit 0", "\n");
+const INSTALLER_CONTENT: &str = include_str!("./installer.sh");
+const INSTALL_MODULE_SCRIPT: &str = concatcp!(
+    INSTALLER_CONTENT,
+    "\n",
+    "install_module",
+    "\n",
+    "exit 0",
+    "\n"
+);
 
 fn exec_install_script(module_file: &str) -> Result<()> {
     let realpath = std::fs::canonicalize(module_file)
@@ -40,6 +46,10 @@ fn exec_install_script(module_file: &str) -> Result<()> {
             "PATH",
             format!("{}:{}", env_var("PATH").unwrap(), defs::BINARY_DIR),
         )
+        .env("KSU", "true")
+        .env("KSU_KERNEL_VER_CODE", crate::ksu::get_version().to_string())
+        .env("KSU_VER", defs::VERSION_NAME)
+        .env("KSU_VER_CODE", defs::VERSION_CODE)
         .env("OUTFD", "1")
         .env("ZIPFILE", realpath)
         .stderr(Stdio::null())
@@ -77,6 +87,9 @@ fn mark_module_state(module: &str, flag_file: &str, create_or_delete: bool) -> R
 }
 
 fn get_minimal_image_size(img: &str) -> Result<u64> {
+
+    check_image(img)?;
+
     let output = Command::new("resize2fs")
         .args(["-P", img])
         .stdout(Stdio::piped())
@@ -171,7 +184,7 @@ pub fn load_sepolicy_rule() -> Result<()> {
         let path = entry.path();
         let disabled = path.join(defs::DISABLE_FILE_NAME);
         if disabled.exists() {
-            println!("{} is disabled, skip", path.display());
+            info!("{} is disabled, skip", path.display());
             continue;
         }
 
@@ -179,10 +192,10 @@ pub fn load_sepolicy_rule() -> Result<()> {
         if !rule_file.exists() {
             continue;
         }
-        println!("load policy: {}", &rule_file.display());
+        info!("load policy: {}", &rule_file.display());
 
         if sepolicy::apply_file(&rule_file).is_err() {
-            println!("Failed to load sepolicy.rule for {}", &rule_file.display());
+            warn!("Failed to load sepolicy.rule for {}", &rule_file.display());
         }
     }
 
@@ -209,11 +222,14 @@ fn exec_script<T: AsRef<Path>>(path: T, wait: bool) -> Result<()> {
         .arg("sh")
         .arg(path.as_ref())
         .env("ASH_STANDALONE", "1")
+        .env("KSU", "true")
+        .env("KSU_KERNEL_VER_CODE", crate::ksu::get_version().to_string())
+        .env("KSU_VER_CODE", defs::VERSION_CODE)
+        .env("KSU_VER", defs::VERSION_NAME)
         .env(
             "PATH",
             format!("{}:{}", env_var("PATH").unwrap(), defs::BINARY_DIR),
-        )
-        .env("KSU", "true");
+        );
 
     let result = if wait {
         command.status().map(|_| ())
