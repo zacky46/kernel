@@ -96,3 +96,32 @@ pub fn get_zip_uncompressed_size(zip_path: &str) -> Result<u64> {
         .sum();
     Ok(total)
 }
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn switch_mnt_ns(pid: i32) -> Result<()> {
+    use anyhow::ensure;
+    use std::os::fd::AsRawFd;
+    let path = format!("/proc/{}/ns/mnt", pid);
+    let fd = std::fs::File::open(path)?;
+    let ret = unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNS) };
+    ensure!(ret == 0, "switch mnt ns failed");
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn unshare_mnt_ns() -> Result<()> {
+    use anyhow::ensure;
+    let ret = unsafe { libc::unshare(libc::CLONE_NEWNS) };
+    ensure!(ret == 0, "unshare mnt ns failed");
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn umask(mask: u32) {
+    unsafe { libc::umask(mask) };
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn umask(_mask: u32) {
+    unimplemented!("umask is not supported on this platform")
+}
