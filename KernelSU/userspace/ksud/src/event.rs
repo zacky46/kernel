@@ -3,7 +3,7 @@ use log::{info, warn};
 use std::{collections::HashMap, path::Path};
 
 use crate::{
-    assets, defs, mount,
+    assets, defs, mount, restorecon,
     utils::{self, ensure_clean_dir, ensure_dir_exists},
 };
 
@@ -20,16 +20,10 @@ fn mount_partition(partition: &str, lowerdir: &mut Vec<String>) -> Result<()> {
     }
 
     // handle stock mounts under /partition, we should restore the mount point after overlay
+    // because the overlayfs mount will "overlay" the bind mount such as /vendor/bt_firmware, /vendor/dsp
+    // which will cause the system bootloop or bluetooth/dsp not working
     let stock_mount = mount::StockMount::new(&format!("/{partition}/"))
         .with_context(|| format!("get stock mount of partition: {partition} failed"))?;
-    let result = stock_mount.umount();
-    if result.is_err() {
-        let remount_result = stock_mount.remount();
-        if remount_result.is_err() {
-            log::error!("remount stock mount of failed: {:?}", remount_result);
-        }
-        bail!("umount stock mount of failed: {:?}", result);
-    }
 
     // add /partition as the lowerest dir
     let lowest_dir = format!("/{partition}");
@@ -40,11 +34,13 @@ fn mount_partition(partition: &str, lowerdir: &mut Vec<String>) -> Result<()> {
 
     let result = mount::mount_overlay(&lowerdir, &lowest_dir);
 
-    if result.is_ok() && stock_mount.remount().is_err() {
-        // if mount overlay ok but stock remount failed, we should umount overlay
-        warn!("remount stock mount of failed, umount overlay {lowest_dir} now");
-        if mount::umount_dir(&lowest_dir).is_err() {
-            warn!("umount overlay {lowest_dir} failed");
+    if let Err(e) = stock_mount.remount() {
+        if result.is_ok() {
+            // if mount overlay ok but stock remount failed, we should umount overlay
+            warn!("remount stock failed: {:?}, umount overlay {lowest_dir}", e);
+            if mount::umount_dir(&lowest_dir).is_err() {
+                warn!("umount overlay {lowest_dir} failed");
+            }
         }
     }
 
@@ -112,6 +108,11 @@ pub fn mount_systemlessly(module_dir: &str) -> Result<()> {
 
 pub fn on_post_data_fs() -> Result<()> {
     crate::ksu::report_post_fs_data();
+
+    if utils::has_magisk() {
+        warn!("Magisk detected, skip post-fs-data!");
+        return Ok(());
+    }
 
     utils::umask(0);
 
@@ -201,11 +202,16 @@ pub fn on_post_data_fs() -> Result<()> {
 pub fn on_services() -> Result<()> {
     utils::umask(0);
 
-    // check safe mode first.
+    if utils::has_magisk() {
+        warn!("Magisk detected, skip services!");
+        return Ok(());
+    }
+
     if crate::utils::is_safe_mode() {
         warn!("safe mode, skip module service scripts");
         return Ok(());
     }
+
     if let Err(e) = crate::module::exec_common_scripts("service.d", false) {
         warn!("Failed to exec common service scripts: {}", e);
     }
@@ -240,7 +246,23 @@ pub fn daemon() -> Result<()> {
 pub fn install() -> Result<()> {
     ensure_dir_exists(defs::ADB_DIR)?;
     std::fs::copy("/proc/self/exe", defs::DAEMON_PATH)?;
-
+    restorecon::setcon(defs::DAEMON_PATH, restorecon::ADB_CON)?;
     // install binary assets
-    assets::ensure_binaries().with_context(|| "Failed to extract assets")
+    assets::ensure_binaries().with_context(|| "Failed to extract assets")?;
+
+    #[cfg(target_os = "android")]
+    link_ksud_to_bin()?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn link_ksud_to_bin() -> Result<()> {
+    use std::path::PathBuf;
+    let ksu_bin = PathBuf::from(defs::DAEMON_PATH);
+    let ksu_bin_link = PathBuf::from(defs::DAEMON_LINK_PATH);
+    if ksu_bin.exists() && !ksu_bin_link.exists() {
+        std::os::unix::fs::symlink(&ksu_bin, &ksu_bin_link)?;
+    }
+    Ok(())
 }

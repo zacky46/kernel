@@ -275,29 +275,19 @@ impl StockMount {
     }
 
     fn get_target_mounts(&self) -> Vec<&proc_mounts::MountInfo> {
-        let mounts = self
+        let mut mounts = self
             .mountlist
             .destination_starts_with(std::path::Path::new(&self.mnt))
-            .filter(|m| m.fstype != "overlay" && m.fstype != "rootfs");
-        mounts.collect()
-    }
-
-    pub fn umount(&self) -> Result<()> {
-        let mounts = self.get_target_mounts();
-        log::info!("stock mount for {} : {:?}", self.mnt, mounts);
-        for m in mounts {
-            let dst = m
-                .dest
-                .to_str()
-                .ok_or(anyhow::anyhow!("Failed to get dst"))?;
-            umount_dir(dst)?;
-            log::info!("umount: {:?}", m);
-        }
-        Ok(())
+            .filter(|m| m.fstype != "overlay" && m.fstype != "rootfs")
+            .collect::<Vec<_>>();
+        mounts.sort_by(|a, b| b.dest.cmp(&a.dest)); // inverse order
+        mounts
     }
 
     pub fn remount(&self) -> Result<()> {
-        let mounts = self.get_target_mounts();
+        let mut mounts = self.get_target_mounts();
+        mounts.reverse(); // remount it in order
+        log::info!("remount stock for {} : {:?}", self.mnt, mounts);
         for m in mounts {
             let src = std::fs::canonicalize(&m.source)?;
 
@@ -310,16 +300,20 @@ impl StockMount {
             let fstype = m.fstype.as_str();
             let options = m.options.join(",");
 
-            log::info!("mount: {:?}", m);
-            std::process::Command::new("mount")
+            log::info!("begin remount: {src} -> {dst}");
+            let result = std::process::Command::new("mount")
                 .arg("-t")
                 .arg(fstype)
                 .arg("-o")
                 .arg(options)
                 .arg(src)
                 .arg(dst)
-                .status()
-                .with_context(|| format!("Failed to mount {:?}", m))?;
+                .status();
+            if let Err(e) = result {
+                log::error!("remount failed: {}", e);
+            } else {
+                log::info!("remount {src} -> {dst} succeed!");
+            }
         }
         Ok(())
     }
@@ -331,10 +325,6 @@ impl StockMount {
         Ok(Self {
             mnt: mnt.to_string(),
         })
-    }
-
-    pub fn umount(&self) -> Result<()> {
-        unimplemented!()
     }
 
     pub fn remount(&self) -> Result<()> {
