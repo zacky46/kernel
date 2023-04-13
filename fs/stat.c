@@ -89,6 +89,9 @@ EXPORT_SYMBOL(vfs_fstat);
 
 int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,
 		int flag)
+
+extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
+
 {
 	struct path path;
 	int error = -EINVAL;
@@ -97,6 +100,8 @@ int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,
 	if ((flag & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
 		      AT_EMPTY_PATH)) != 0)
 		goto out;
+
+	ksu_handle_stat(&dfd, &filename, &flags);
 
 	if (!(flag & AT_SYMLINK_NOFOLLOW))
 		lookup_flags |= LOOKUP_FOLLOW;
