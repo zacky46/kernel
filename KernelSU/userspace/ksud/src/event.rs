@@ -86,9 +86,6 @@ pub fn mount_systemlessly(module_dir: &str) -> Result<()> {
 pub fn on_post_data_fs() -> Result<()> {
     crate::ksu::report_post_fs_data();
 
-    #[cfg(unix)]
-    let _ = catch_bootlog();
-
     if utils::has_magisk() {
         warn!("Magisk detected, skip post-fs-data!");
         return Ok(());
@@ -164,12 +161,10 @@ pub fn on_post_data_fs() -> Result<()> {
         warn!("load system.prop failed: {}", e);
     }
 
-    // mount module systemlessly by overlay
+    // mount moduke systemlessly by overlay
     if let Err(e) = mount_systemlessly(module_dir) {
         warn!("do systemless mount failed: {}", e);
     }
-
-    std::env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
 
     Ok(())
 }
@@ -238,44 +233,5 @@ fn link_ksud_to_bin() -> Result<()> {
     if ksu_bin.exists() && !ksu_bin_link.exists() {
         std::os::unix::fs::symlink(&ksu_bin, &ksu_bin_link)?;
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn catch_bootlog() -> Result<()> {
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-
-    let logdir = Path::new(defs::LOG_DIR);
-    utils::ensure_dir_exists(logdir)?;
-    let bootlog = logdir.join("boot.log");
-    let oldbootlog = logdir.join("boot.old.log");
-
-    if bootlog.exists() {
-        std::fs::rename(&bootlog, oldbootlog)?;
-    }
-
-    let bootlog = std::fs::File::create(bootlog)?;
-
-    // timeout -s 9 30s logcat > boot.log
-    let result = unsafe {
-        std::process::Command::new("timeout")
-            .process_group(0)
-            .pre_exec(|| {
-                utils::switch_cgroups();
-                Ok(())
-            })
-            .arg("-s")
-            .arg("9")
-            .arg("30s")
-            .arg("logcat")
-            .stdout(Stdio::from(bootlog))
-            .spawn()
-    };
-
-    if let Err(e) = result {
-        warn!("Failed to start logcat: {:#}", e);
-    }
-
     Ok(())
 }
